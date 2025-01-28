@@ -10,9 +10,23 @@ import (
 	// "github.com/xwb1989/sqlparser"
 )
 
+type Page struct {
+	header       PageHeader
+	cellPointers []uint16
+	cellContents []byte
+}
+type PageHeader struct {
+	pageType           uint8
+	firstFreeblock     uint16
+	numberOfCells      uint16
+	startOfCellContent uint16
+	freeBytes          uint8
+	firstMostPointer   *uint32
+}
 type DatabaseFile struct {
 	header   []byte
 	pageSize uint16
+	pages    []Page
 }
 
 // Usage: your_program.sh sample.db .dbinfo
@@ -21,13 +35,29 @@ func main() {
 	command := os.Args[2]
 	database := DatabaseFile{}
 	databaseFile, err := os.Open(databaseFilePath)
+	database.initHeaderPage(databaseFile)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	database.header = make([]byte, 100)
+	// You can use print statements as follows for debugging, they'll be visible when running tests.
+	fmt.Fprintln(os.Stderr, "Logs from your program will appear here!")
+	switch command {
+	case ".dbinfo":
 
-	_, err = databaseFile.Read(database.header)
+		// Uncomment this to pass the first stage
+		fmt.Println("database page size: ", database.pageSize)
+		fmt.Println("number of tables: ", database.pages[0].header.numberOfCells)
+	default:
+		fmt.Println("Unknown command", command)
+		os.Exit(1)
+	}
+}
+
+func (database *DatabaseFile) initHeaderPage(databaseFile *os.File) {
+
+	database.header = make([]byte, 100)
+	_, err := databaseFile.Read(database.header)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -36,15 +66,26 @@ func main() {
 		fmt.Println("Failed to read integer:", err)
 		return
 	}
-	// You can use print statements as follows for debugging, they'll be visible when running tests.
-	fmt.Fprintln(os.Stderr, "Logs from your program will appear here!")
-	switch command {
-	case ".dbinfo":
+	_, err = databaseFile.Seek(0, 0)
 
-		// Uncomment this to pass the first stage
-		fmt.Printf("database page size: %v", database.pageSize)
-	default:
-		fmt.Println("Unknown command", command)
-		os.Exit(1)
+	page := make([]byte, database.pageSize)
+	_, err = databaseFile.Read(page)
+	var pageHeaderBytes [12]byte
+	if err := binary.Read(bytes.NewReader(page[100:112]), binary.BigEndian, &pageHeaderBytes); err != nil {
+		fmt.Println("Failed to read integer:", err)
+		return
 	}
+	firstMostPointer := new(uint32)
+	*firstMostPointer = binary.BigEndian.Uint32(pageHeaderBytes[8:12])
+	pageHeader := PageHeader{
+		pageType:           pageHeaderBytes[0],
+		firstFreeblock:     binary.BigEndian.Uint16(pageHeaderBytes[1:3]),
+		numberOfCells:      binary.BigEndian.Uint16(pageHeaderBytes[3:5]),
+		startOfCellContent: binary.BigEndian.Uint16(pageHeaderBytes[5:7]),
+		freeBytes:          pageHeaderBytes[7],
+		firstMostPointer:   firstMostPointer,
+	}
+
+	database.pages = append(database.pages, Page{pageHeader, nil, nil})
+
 }
