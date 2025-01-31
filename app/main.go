@@ -185,7 +185,6 @@ func (database *DatabaseFile) initHeaderPage(databaseFile *os.File) {
 		return
 	}
 	database.pages = append(database.pages, page)
-	fmt.Println(database.pages)
 	return
 }
 
