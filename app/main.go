@@ -20,29 +20,9 @@ type null struct{ typeSize uint64 }
 
 func (x null) size() uint64 { return x.typeSize }
 
-type size8 struct{ typeSize uint64 }
+type integer struct{ typeSize uint64 }
 
-func (x size8) size() uint64 { return x.typeSize }
-
-type size16 struct{ typeSize uint64 }
-
-func (x size16) size() uint64 { return x.typeSize }
-
-type size24 struct{ typeSize uint64 }
-
-func (x size24) size() uint64 { return x.typeSize }
-
-type size32 struct{ typeSize uint64 }
-
-func (x size32) size() uint64 { return x.typeSize }
-
-type size48 struct{ typeSize uint64 }
-
-func (x size48) size() uint64 { return x.typeSize }
-
-type size64 struct{ typeSize uint64 }
-
-func (x size64) size() uint64 { return x.typeSize }
+func (x integer) size() uint64 { return x.typeSize }
 
 type float struct{ typeSize uint64 }
 
@@ -77,17 +57,17 @@ func makebodyFormat(i uint64) bodyFormat {
 	case 0:
 		return null{0}
 	case 1:
-		return size8{1}
+		return integer{1}
 	case 2:
-		return size16{2}
+		return integer{2}
 	case 3:
-		return size24{3}
+		return integer{3}
 	case 4:
-		return size32{4}
+		return integer{4}
 	case 5:
-		return size48{6}
+		return integer{6}
 	case 6:
-		return size64{8}
+		return integer{8}
 	case 7:
 		return float{8}
 	case 8:
@@ -105,17 +85,25 @@ func makebodyFormat(i uint64) bodyFormat {
 				return blob{(i - uint64(12)) / 2}
 			case 1:
 
-				return blob{(i - uint64(13)) / 2}
+				return bodyString{(i - uint64(13)) / 2}
 			}
 		}
 		panic("Unknown body format")
 	}
 }
 
+type Body struct {
+	name      string
+	tableType string
+	tableName string
+	rootPage  uint64
+	schema    string
+}
+
 type Record struct {
 	headerSize       uint64
 	headerSerialCode bodyFormat
-	body             interface{}
+	body             Body
 }
 type Cell struct {
 	size   uint64
@@ -159,7 +147,11 @@ func main() {
 
 		// Uncomment this to pass the first stage
 		fmt.Println("database page size: ", database.pageSize)
-		fmt.Println("number of tables: ", database.pages[0].header.numberOfCells)
+		tableCount := uint16(0)
+		for _, eachPage := range database.pages {
+			tableCount += eachPage.header.numberOfCells
+		}
+		fmt.Println("number of tables: ", tableCount)
 	default:
 		fmt.Println("Unknown command", command)
 		os.Exit(1)
@@ -187,6 +179,18 @@ func (database *DatabaseFile) initHeaderPage(databaseFile *os.File) {
 		fmt.Println("Failed to read integer:", err)
 		return
 	}
+	page, err := readPage(pageBytes, pageHeaderBytes)
+	if err != nil {
+		fmt.Println("Failed to read page:", err)
+		return
+	}
+	database.pages = append(database.pages, page)
+	fmt.Println(database.pages)
+	return
+}
+
+func readPage(pageBytes []byte, pageHeaderBytes [12]byte) (Page, error) {
+
 	firstMostPointer := new(uint32)
 	*firstMostPointer = binary.BigEndian.Uint32(pageHeaderBytes[8:12])
 	pageHeader := PageHeader{
@@ -197,17 +201,20 @@ func (database *DatabaseFile) initHeaderPage(databaseFile *os.File) {
 		freeBytes:          pageHeaderBytes[7],
 		firstMostPointer:   firstMostPointer,
 	}
+
 	var page Page
+	page.header = pageHeader
 	cellPointers := make([]byte, pageHeader.numberOfCells*2)
 	if err := binary.Read(bytes.NewReader(pageBytes[112:112+pageHeader.numberOfCells*2]), binary.BigEndian, &cellPointers); err != nil {
 		fmt.Println("Failed to read integer:", err)
-		return
+		return page, err
 	}
 
 	page.cellPointers = make([]uint64, pageHeader.numberOfCells)
 	for i := 0; i < len(page.cellPointers); i++ {
 		page.cellPointers[i] = uint64(binary.BigEndian.Uint16(cellPointers[(i * 2) : (i*2)+2]))
 	}
+
 	//variant decoding
 	totalOffset := uint64(0)
 	recordSize, recordSizeOffset := readVariant(pageBytes, page.cellPointers[0], totalOffset)
@@ -216,49 +223,69 @@ func (database *DatabaseFile) initHeaderPage(databaseFile *os.File) {
 	totalOffset += rowidOffset
 	headerSize, headerSizeOffset := readVariant(pageBytes, page.cellPointers[0], totalOffset)
 	totalOffset += headerSizeOffset
-	headerSerialcodes := make([]bodyFormat, 0, headerSize-1)
-	for i := uint64(0); i < headerSize-1; {
+	headerSize-- // subtract 1 because the first byte is the is the size byte and that not included in the array
+	headerSerialcodes := make([]bodyFormat, 0, headerSize)
+
+	for i := uint64(0); i < headerSize; {
 		headerSerialInt, headerSerialCodeOffset := readVariant(pageBytes, page.cellPointers[0], totalOffset)
 		headerSerialCode := makebodyFormat(headerSerialInt)
-		if err != nil {
-			fmt.Println("Failed to read integer:", err)
-			return
-		}
 		headerSerialcodes = append(headerSerialcodes, headerSerialCode)
 		totalOffset += headerSerialCodeOffset
 		i += headerSerialCodeOffset
 	}
-	recordBody := make([]interface{}, len(headerSerialcodes))
-	fmt.Println(headerSerialcodes)
+	recordParts := make([]interface{}, len(headerSerialcodes))
 	for i, v := range headerSerialcodes {
-		record, size := readRecord(pageBytes, page.cellPointers[0], totalOffset, v, headerSize)
-		recordBody[i] = record
+		record, size := readRecord(pageBytes, page.cellPointers[0], totalOffset, v)
+		recordParts[i] = record
 		totalOffset += size
 	}
-	_ = rowid
-	recordSize = recordSize + headerSize
-	fmt.Println(recordBody)
-	database.pages = append(database.pages, page)
+
+	var name, tableType, tableName, schema string
+	var rootPage uint64
+	if value, ok := recordParts[0].(string); ok {
+		name = value
+	}
+	if value, ok := recordParts[1].(string); ok {
+		tableType = value
+	}
+	if value, ok := recordParts[2].(string); ok {
+		tableName = value
+	}
+	if value, ok := recordParts[3].(uint64); ok {
+		rootPage = value
+	}
+	if value, ok := recordParts[4].(string); ok {
+		schema = value
+	}
+
+	body := Body{name, tableType, tableName, rootPage, schema}
+	record := Record{headerSize, makebodyFormat(headerSize), body}
+	records := []Record{record}
+	cell := Cell{recordSize, rowid, records}
+	page.cellContents = append(page.cellContents, cell)
+	return page, nil
 
 }
 
-func readRecord(pageBytes []byte, start uint64, offset uint64, headerSerialCode bodyFormat, headerSize uint64) (Record, uint64) {
-	fmt.Println(start, offset, headerSerialCode, headerSize)
+func readRecord(pageBytes []byte, start uint64, offset uint64, headerSerialCode bodyFormat) (interface{}, uint64) {
 	var output interface{}
 	size := headerSerialCode.size()
+	if start+offset+size > uint64(len(pageBytes)) {
+		panic(fmt.Sprintf("Attempting to read beyond bounds: start=%d, offset=%d, size=%d, pageBytes length=%d", start, offset, size, len(pageBytes)))
+	}
 	switch headerSerialCode.(type) {
 	case null:
-		return Record{headerSize, makebodyFormat(0), nil}, 1
+		return nil, 1
 	case bodyString:
-		var result []rune
-		err := binary.Read(bytes.NewReader(pageBytes[start+offset:start+offset+size]), binary.BigEndian, &result)
-		fmt.Println(result)
+		resultByte := make([]byte, size)
+		err := binary.Read(bytes.NewReader(pageBytes[start+offset:start+offset+size]), binary.BigEndian, &resultByte)
+		result := string(resultByte)
 		if err != nil {
 			panic(err)
 		}
 		output = result
 	case blob:
-		var result []byte
+		result := make([]byte, size)
 		err := binary.Read(bytes.NewReader(pageBytes[start+offset:start+offset+size]), binary.BigEndian, &result)
 		if err != nil {
 			panic(err)
@@ -276,15 +303,40 @@ func readRecord(pageBytes []byte, start uint64, offset uint64, headerSerialCode 
 	case int1:
 		output = 1
 	default:
-		var result uint64
-		err := binary.Read(bytes.NewReader(pageBytes[start+offset:start+offset+size]), binary.BigEndian, &result)
+
+		var err error
+		switch size {
+		case 1:
+			result := uint8(0)
+			err = binary.Read(bytes.NewReader(pageBytes[start+offset:start+offset+size]), binary.BigEndian, &result)
+			output = result
+		case 2:
+			result := uint16(0)
+			err = binary.Read(bytes.NewReader(pageBytes[start+offset:start+offset+size]), binary.BigEndian, &result)
+			output = result
+		case 4:
+			result := uint32(0)
+			err = binary.Read(bytes.NewReader(pageBytes[start+offset:start+offset+size]), binary.BigEndian, &result)
+			output = result
+		case 6:
+			result := uint64(0)
+			err = binary.Read(bytes.NewReader(pageBytes[start+offset:start+offset+size]), binary.BigEndian, &result)
+			output = result
+		case 8:
+			result := uint64(0)
+			err = binary.Read(bytes.NewReader(pageBytes[start+offset:start+offset+size]), binary.BigEndian, &result)
+			output = result
+		default:
+			panic(fmt.Sprintf("Invalid integer size: %d", size))
+		}
+		if value, ok := output.(uint64); size == 6 && ok {
+			output = uint64(value) >> 2
+		}
 		if err != nil {
 			panic(err)
 		}
-		output = result
 	}
-	fmt.Println(output)
-	return Record{headerSize, makebodyFormat(size), output}, size
+	return output, size
 }
 
 func readVariant(bytes []byte, start uint64, offset uint64) (uint64, uint64) {
