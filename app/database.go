@@ -109,9 +109,9 @@ type Database struct {
 
 func (database *Database) Init(databaseFile *os.File) {
 	database.initHeaderPage(databaseFile)
-	pageBytes := make([]byte, database.pageSize)
-	_, _ = databaseFile.Read(pageBytes)
-	database.makePage(pageBytes)
+	// pageBytes := make([]byte, database.pageSize)
+	// _, _ = databaseFile.Read(pageBytes)
+	// database.makePage(pageBytes)
 }
 
 func makePageHeader(pageBytes []byte, pageNumber uint32) (PageHeader, error) {
@@ -195,54 +195,56 @@ func (database *Database) initHeaderPage(databaseFile *os.File) {
 }
 
 func readPage(pageBytes []byte, page Page) (Page, error) {
-	fmt.Println(page)
 	//variant decoding
-	totalOffset := uint64(0)
-	recordSize, recordSizeOffset := readVariant(pageBytes, page.cellPointers[0], totalOffset)
-	totalOffset += recordSizeOffset
-	rowid, rowidOffset := readVariant(pageBytes, page.cellPointers[0], totalOffset)
-	totalOffset += rowidOffset
-	headerSize, headerSizeOffset := readVariant(pageBytes, page.cellPointers[0], totalOffset)
-	totalOffset += headerSizeOffset
-	headerSize-- // subtract 1 because the first byte is the is the size byte and that not included in the array
-	headerSerialcodes := make([]bodyFormat, 0, headerSize)
-	for i := uint64(0); i < headerSize; {
-		headerSerialInt, headerSerialCodeOffset := readVariant(pageBytes, page.cellPointers[0], totalOffset)
-		headerSerialCode := makebodyFormat(headerSerialInt)
-		headerSerialcodes = append(headerSerialcodes, headerSerialCode)
-		totalOffset += headerSerialCodeOffset
-		i += headerSerialCodeOffset
+	for _, cellPointer := range page.cellPointers {
+		totalOffset := uint64(0)
+		recordSize, recordSizeOffset := readVariant(pageBytes, cellPointer, totalOffset)
+		totalOffset += recordSizeOffset
+		rowid, rowidOffset := readVariant(pageBytes, cellPointer, totalOffset)
+		totalOffset += rowidOffset
+		headerSize, headerSizeOffset := readVariant(pageBytes, cellPointer, totalOffset)
+		totalOffset += headerSizeOffset
+		headerSize-- // subtract 1 because the first byte is the is the size byte and that not included in the array
+		headerSerialcodes := make([]bodyFormat, 0, headerSize)
+		for i := uint64(0); i < headerSize; {
+			headerSerialInt, headerSerialCodeOffset := readVariant(pageBytes, cellPointer, totalOffset)
+			headerSerialCode := makebodyFormat(headerSerialInt)
+			headerSerialcodes = append(headerSerialcodes, headerSerialCode)
+			totalOffset += headerSerialCodeOffset
+			i += headerSerialCodeOffset
+		}
+		recordParts := make([]interface{}, len(headerSerialcodes))
+		for i, v := range headerSerialcodes {
+			record, size := readRecord(pageBytes, cellPointer, totalOffset, v)
+			recordParts[i] = record
+			totalOffset += size
+		}
+		var name, tableType, tableName, schema string
+		var rootPage uint64
+		body := Body{}
+		if len(recordParts) == 5 {
+			if value, ok := recordParts[0].(string); ok {
+				tableType = value
+			}
+			if value, ok := recordParts[1].(string); ok {
+				name = value
+			}
+			if value, ok := recordParts[2].(string); ok {
+				tableName = value
+			}
+			if value, ok := recordParts[3].(uint64); ok {
+				rootPage = value
+			}
+			if value, ok := recordParts[4].(string); ok {
+				schema = value
+			}
+			body = Body{name, tableType, tableName, rootPage, schema}
+		}
+		record := Record{headerSize, makebodyFormat(headerSize), body}
+		records := []Record{record}
+		cell := Cell{recordSize, rowid, records}
+		page.cellContents = append(page.cellContents, cell)
 	}
-	recordParts := make([]interface{}, len(headerSerialcodes))
-	for i, v := range headerSerialcodes {
-		record, size := readRecord(pageBytes, page.cellPointers[0], totalOffset, v)
-		recordParts[i] = record
-		totalOffset += size
-	}
-
-	var name, tableType, tableName, schema string
-	var rootPage uint64
-	if value, ok := recordParts[0].(string); ok {
-		name = value
-	}
-	if value, ok := recordParts[1].(string); ok {
-		tableType = value
-	}
-	if value, ok := recordParts[2].(string); ok {
-		tableName = value
-	}
-	if value, ok := recordParts[3].(uint64); ok {
-		rootPage = value
-	}
-	if value, ok := recordParts[4].(string); ok {
-		schema = value
-	}
-
-	body := Body{name, tableType, tableName, rootPage, schema}
-	record := Record{headerSize, makebodyFormat(headerSize), body}
-	records := []Record{record}
-	cell := Cell{recordSize, rowid, records}
-	page.cellContents = append(page.cellContents, cell)
 	return page, nil
 
 }

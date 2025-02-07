@@ -23,6 +23,14 @@ func main() {
 	// You can use print statements as follows for debugging, they'll be visible when running tests.
 	fmt.Fprintln(os.Stderr, "Logs from your program will appear here!")
 	switch command {
+	case ".tables":
+		for _, page := range database.pages {
+			for _, cell := range page.cellContents {
+				for _, record := range cell.record {
+					fmt.Println(record.body.name)
+				}
+			}
+		}
 	case ".dbinfo":
 
 		// Uncomment this to pass the first stage
